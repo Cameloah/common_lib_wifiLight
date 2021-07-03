@@ -22,6 +22,10 @@
 #define LED_TYPE WS2812B
 #define CORRECTION TypicalLEDStrip
 
+#define LIGHT_VERSION 3.1
+#define LIGHT_NAME_MAX_LENGTH 32 // Longer name will get stripped
+#define ENTERTAINMENT_TIMEOUT 1500 // millis
+
 // May get messed up with SPI CLOCK_PIN with this particular bulb
 #define use_hardware_switch false // To control on/off state and brightness using GPIO/Pushbutton, set this value to true.
 //For GPIO based on/off and brightness control, it is mandatory to connect the following GPIO pins to ground using 10k resistor
@@ -37,8 +41,9 @@
 CRGBArray<NUM_LEDS> leds;
 
 // define details of virtual hue-lights -- adapt to your needs!
-String HUE_Name = "Hue SK9822 FastLED strip";   //max 32 characters!!!
+char lightName[LIGHT_NAME_MAX_LENGTH] = "Hue SK9822 FastLED strip";   //max 32 characters!!!
 int HUE_LightsCount = 2;                     //number of emulated hue-lights
+uint16_t dividedLightsArray[30];
 int HUE_PixelPerLight = 15;                  //number of leds forming one emulated hue-light
 int HUE_TransitionLeds = 1;                 //number of 'space'-leds inbetween the emulated hue-lights; pixelCount must be divisible by this value
 int HUE_FirstHueLightNr = 18;                //first free number for the first hue-light (look in diyHue config.json)
@@ -52,15 +57,23 @@ byte mac[6]; // to hold  the wifi mac address
 
 uint8_t scene;
 uint8_t startup;
-bool inTransition;
 bool hwSwitch = false;
+
+struct state {
+    uint8_t colors[3], bri = 100, sat = 254, colorMode = 2;
+    bool lightState;
+    int ct = 200, hue;
+    float stepLevel[3], currentColors[3], x, y;
+};
+
+state lights[10];
+bool inTransition, entertainmentRun;
+uint8_t rgb_multiplier[] = {100, 100, 100}; // light multiplier in percentage /R, G, B/
 
 WebServer websrv(80);
 Preferences Conf;
 //MQTTClient MQTT(1024);
 WiFiClient net;
-
-HueApi objHue = HueApi(leds, mac, HUE_FirstHueLightNr);
 
 void Log(String msg) {
 
@@ -82,6 +95,150 @@ String WebLog(String message) {
     return message;
 }
 
+void convertHue(uint8_t light) // convert hue / sat values from HUE API to RGB
+{
+    double      hh, p, q, t, ff, s, v;
+    long        i;
+
+    s = lights[light].sat / 255.0;
+    v = lights[light].bri / 255.0;
+
+    if (s <= 0.0) {      // < is bogus, just shuts up warnings
+        lights[light].colors[0] = v;
+        lights[light].colors[1] = v;
+        lights[light].colors[2] = v;
+        return;
+    }
+    hh = lights[light].hue;
+    if (hh >= 65535.0) hh = 0.0;
+    hh /= 11850, 0;
+    i = (long)hh;
+    ff = hh - i;
+    p = v * (1.0 - s);
+    q = v * (1.0 - (s * ff));
+    t = v * (1.0 - (s * (1.0 - ff)));
+
+    switch (i) {
+        case 0:
+            lights[light].colors[0] = v * 255.0;
+            lights[light].colors[1] = t * 255.0;
+            lights[light].colors[2] = p * 255.0;
+            break;
+        case 1:
+            lights[light].colors[0] = q * 255.0;
+            lights[light].colors[1] = v * 255.0;
+            lights[light].colors[2] = p * 255.0;
+            break;
+        case 2:
+            lights[light].colors[0] = p * 255.0;
+            lights[light].colors[1] = v * 255.0;
+            lights[light].colors[2] = t * 255.0;
+            break;
+
+        case 3:
+            lights[light].colors[0] = p * 255.0;
+            lights[light].colors[1] = q * 255.0;
+            lights[light].colors[2] = v * 255.0;
+            break;
+        case 4:
+            lights[light].colors[0] = t * 255.0;
+            lights[light].colors[1] = p * 255.0;
+            lights[light].colors[2] = v * 255.0;
+            break;
+        case 5:
+        default:
+            lights[light].colors[0] = v * 255.0;
+            lights[light].colors[1] = p * 255.0;
+            lights[light].colors[2] = q * 255.0;
+            break;
+    }
+
+}
+
+void convertXy(uint8_t light) // convert CIE xy values from HUE API to RGB
+{
+    int optimal_bri = lights[light].bri;
+    if (optimal_bri < 5) {
+        optimal_bri = 5;
+    }
+    float Y = lights[light].y;
+    float X = lights[light].x;
+    float Z = 1.0f - lights[light].x - lights[light].y;
+
+    // sRGB D65 conversion
+    float r =  X * 3.2406f - Y * 1.5372f - Z * 0.4986f;
+    float g = -X * 0.9689f + Y * 1.8758f + Z * 0.0415f;
+    float b =  X * 0.0557f - Y * 0.2040f + Z * 1.0570f;
+
+
+    // Apply gamma correction
+    r = r <= 0.0031308f ? 12.92f * r : (1.0f + 0.055f) * pow(r, (1.0f / 2.4f)) - 0.055f;
+    g = g <= 0.0031308f ? 12.92f * g : (1.0f + 0.055f) * pow(g, (1.0f / 2.4f)) - 0.055f;
+    b = b <= 0.0031308f ? 12.92f * b : (1.0f + 0.055f) * pow(b, (1.0f / 2.4f)) - 0.055f;
+
+    // Apply multiplier for white correction
+    r = r * rgb_multiplier[0] / 100;
+    g = g * rgb_multiplier[1] / 100;
+    b = b * rgb_multiplier[2] / 100;
+
+    if (r > b && r > g) {
+        // red is biggest
+        if (r > 1.0f) {
+            g = g / r;
+            b = b / r;
+            r = 1.0f;
+        }
+    }
+    else if (g > b && g > r) {
+        // green is biggest
+        if (g > 1.0f) {
+            r = r / g;
+            b = b / g;
+            g = 1.0f;
+        }
+    }
+    else if (b > r && b > g) {
+        // blue is biggest
+        if (b > 1.0f) {
+            r = r / b;
+            g = g / b;
+            b = 1.0f;
+        }
+    }
+
+    r = r < 0 ? 0 : r;
+    g = g < 0 ? 0 : g;
+    b = b < 0 ? 0 : b;
+
+    lights[light].colors[0] = (int) (r * optimal_bri); lights[light].colors[1] = (int) (g * optimal_bri); lights[light].colors[2] = (int) (b * optimal_bri);
+}
+
+void convertCt(uint8_t light) // convert ct (color temperature) value from HUE API to RGB
+{
+    int hectemp = 10000 / lights[light].ct;
+    int r, g, b;
+    if (hectemp <= 66) {
+        r = 255;
+        g = 99.4708025861 * log(hectemp) - 161.1195681661;
+        b = hectemp <= 19 ? 0 : (138.5177312231 * log(hectemp - 10) - 305.0447927307);
+    } else {
+        r = 329.698727446 * pow(hectemp - 60, -0.1332047592);
+        g = 288.1221695283 * pow(hectemp - 60, -0.0755148492);
+        b = 255;
+    }
+
+    r = r > 255 ? 255 : r;
+    g = g > 255 ? 255 : g;
+    b = b > 255 ? 255 : b;
+
+    // Apply multiplier for white correction
+    r = r * rgb_multiplier[0] / 100;
+    g = g * rgb_multiplier[1] / 100;
+    b = b * rgb_multiplier[2] / 100;
+
+    lights[light].colors[0] = r * (lights[light].bri / 255.0f); lights[light].colors[1] = g * (lights[light].bri / 255.0f); lights[light].colors[2] = b * (lights[light].bri / 255.0f);
+}
+
 void infoLight(CRGB color) {
 
     // Flash the strip in the selected color. White = booted, green = WLAN connected, red = WLAN could not connect
@@ -94,6 +251,25 @@ void infoLight(CRGB color) {
     FastLED.show();
 }
 
+void processLightdata(uint8_t light, float transitiontime) { // calculate the step level of every RGB channel for a smooth transition in requested transition time
+    transitiontime *= 17 - (NUM_LEDS / 40); //every extra led add a small delay that need to be counted for transition time match
+    if (lights[light].colorMode == 1 && lights[light].lightState == true) {
+        convertXy(light);
+    } else if (lights[light].colorMode == 2 && lights[light].lightState == true) {
+        convertCt(light);
+    } else if (lights[light].colorMode == 3 && lights[light].lightState == true) {
+        convertHue(light);
+    }
+    for (uint8_t i = 0; i < 3; i++) {
+        if (lights[light].lightState) {
+            lights[light].stepLevel[i] = ((float)lights[light].colors[i] - lights[light].currentColors[i]) / transitiontime;
+        } else {
+            lights[light].stepLevel[i] = lights[light].currentColors[i] / transitiontime;
+        }
+    }
+}
+
+
 void saveState() {
 
     String Output;
@@ -102,16 +278,16 @@ void saveState() {
 
     for (uint8_t i = 0; i < HUE_LightsCount; i++) {
         light = json.createNestedObject((String)i);
-        light["on"] = objHue.lights[i].lightState;
-        light["bri"] = objHue.lights[i].bri;
-        if (objHue.lights[i].colorMode == 1) {
-            light["x"] = objHue.lights[i].x;
-            light["y"] = objHue.lights[i].y;
-        } else if (objHue.lights[i].colorMode == 2) {
-            light["ct"] = objHue.lights[i].ct;
-        } else if (objHue.lights[i].colorMode == 3) {
-            light["hue"] = objHue.lights[i].hue;
-            light["sat"] = objHue.lights[i].sat;
+        light["on"] = lights[i].lightState;
+        light["bri"] = lights[i].bri;
+        if (lights[i].colorMode == 1) {
+            light["x"] = lights[i].x;
+            light["y"] = lights[i].y;
+        } else if (lights[i].colorMode == 2) {
+            light["ct"] = lights[i].ct;
+        } else if (lights[i].colorMode == 3) {
+            light["hue"] = lights[i].hue;
+            light["sat"] = lights[i].sat;
         }
     }
 
@@ -139,27 +315,25 @@ void restoreState() {
         key = state.key().c_str();
         lightId = atoi(key);
         values = state.value();
-        objHue.lights[lightId].lightState = values["on"];
-        objHue.lights[lightId].bri = (uint8_t)values["bri"];
+        lights[lightId].lightState = values["on"];
+        lights[lightId].bri = (uint8_t)values["bri"];
         if (values.containsKey("x")) {
-            objHue.lights[lightId].x = values["x"];
-            objHue.lights[lightId].y = values["y"];
-            objHue.lights[lightId].colorMode = 1;
+            lights[lightId].x = values["x"];
+            lights[lightId].y = values["y"];
+            lights[lightId].colorMode = 1;
         } else if (values.containsKey("ct")) {
-            objHue.lights[lightId].ct = values["ct"];
-            objHue.lights[lightId].colorMode = 2;
+            lights[lightId].ct = values["ct"];
+            lights[lightId].colorMode = 2;
         } else {
             if (values.containsKey("hue")) {
-                objHue.lights[lightId].hue = values["hue"];
-                objHue.lights[lightId].colorMode = 3;
+                lights[lightId].hue = values["hue"];
+                lights[lightId].colorMode = 3;
             }
             if (values.containsKey("sat")) {
-                objHue.lights[lightId].sat = (uint8_t) values["sat"];
-                objHue.lights[lightId].colorMode = 3;
+                lights[lightId].sat = (uint8_t) values["sat"];
+                lights[lightId].colorMode = 3;
             }
-            objHue.lights[lightId].color = CHSV(objHue.lights[lightId].hue, objHue.lights[lightId].sat, objHue.lights[lightId].bri);
         }
-        objHue.processLightdata(lightId, 40);
     }
 }
 
@@ -169,7 +343,7 @@ void saveConfig() {
     DynamicJsonDocument json(1024);
     JsonArray addr, gw, mask;
 
-    json["name"] = HUE_Name;
+    json["name"] = lightName;
     json["startup"] = startup;
     json["scene"] = scene;
     json["on"] = onPin;
@@ -221,7 +395,7 @@ bool loadConfig() {
         return false;
     }
 
-    HUE_Name = json["name"].as<String>();
+    strcpy(lightName, json["name"]);
     startup = json["startup"].as<uint8_t>();
     scene  = json["scene"].as<uint8_t>();
     HUE_LightsCount = json["lightsCount"].as<uint16_t>();
@@ -238,31 +412,120 @@ bool loadConfig() {
     submask = {json["mask"][0], json["mask"][1], json["mask"][2], json["mask"][3]};
     gateway = {json["gw"][0], json["gw"][1], json["gw"][2], json["gw"][3]};
 
-    objHue.setupLights(HUE_Name, HUE_LightsCount, HUE_PixelPerLight, HUE_TransitionLeds);
-
     return true;
 }
 
 void websrvDetect() {
-    String output = objHue.Detect();
+    char macString[32] = {0};
+    sprintf(macString, "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    DynamicJsonDocument root(1024);
+    root["name"] = lightName;
+    root["lights"] = HUE_LightsCount;
+    root["protocol"] = "native_multi";
+    root["modelid"] = "LST002";
+    root["type"] = "ws2812_strip";
+    root["mac"] = String(macString);
+    root["version"] = LIGHT_VERSION;
+    String output;
+    serializeJson(root, output);
     websrv.send(200, "text/plain", output);
-    Log("Detect: " + output);
 }
 
 void websrvStateGet() {
-    String output = objHue.StateGet(websrv.arg("light"));
+    uint8_t light = websrv.arg("light").toInt() - 1;
+    DynamicJsonDocument root(1024);
+    root["on"] = lights[light].lightState;
+    root["bri"] = lights[light].bri;
+    JsonArray xy = root.createNestedArray("xy");
+    xy.add(lights[light].x);
+    xy.add(lights[light].y);
+    root["ct"] = lights[light].ct;
+    root["hue"] = lights[light].hue;
+    root["sat"] = lights[light].sat;
+    if (lights[light].colorMode == 1)
+        root["colormode"] = "xy";
+    else if (lights[light].colorMode == 2)
+        root["colormode"] = "ct";
+    else if (lights[light].colorMode == 3)
+        root["colormode"] = "hs";
+    String output;
+    serializeJson(root, output);
     websrv.send(200, "text/plain", output);
-    Log("StateGet: " + output);
 }
 
 void websrvStatePut() {
-    String output = objHue.StatePut(websrv.arg("plain"));
-    if (output.substring(0, 4) == "FAIL") {
+    bool stateSave = false;
+    DynamicJsonDocument root(1024);
+    DeserializationError error = deserializeJson(root, websrv.arg("plain"));
+
+    if (error) {
         websrv.send(404, "text/plain", "FAIL. " + websrv.arg("plain"));
-        Log("StatePut: FAIL " + websrv.arg("plain"));
+    } else {
+        for (JsonPair state : root.as<JsonObject>()) {
+            const char* key = state.key().c_str();
+            int light = atoi(key) - 1;
+            JsonObject values = state.value();
+            int transitiontime = 4;
+
+            if (values.containsKey("xy")) {
+                lights[light].x = values["xy"][0];
+                lights[light].y = values["xy"][1];
+                lights[light].colorMode = 1;
+            } else if (values.containsKey("ct")) {
+                lights[light].ct = values["ct"];
+                lights[light].colorMode = 2;
+            } else {
+                if (values.containsKey("hue")) {
+                    lights[light].hue = values["hue"];
+                    lights[light].colorMode = 3;
+                }
+                if (values.containsKey("sat")) {
+                    lights[light].sat = values["sat"];
+                    lights[light].colorMode = 3;
+                }
+            }
+
+            if (values.containsKey("on")) {
+                if (values["on"]) {
+                    lights[light].lightState = true;
+                } else {
+                    lights[light].lightState = false;
+                }
+                if (startup == 0) {
+                    stateSave = true;
+                }
+            }
+
+            if (values.containsKey("bri")) {
+                lights[light].bri = values["bri"];
+            }
+
+            if (values.containsKey("bri_inc")) {
+                lights[light].bri += (int) values["bri_inc"];
+                if (lights[light].bri > 255) lights[light].bri = 255;
+                else if (lights[light].bri < 1) lights[light].bri = 1;
+            }
+
+            if (values.containsKey("transitiontime")) {
+                transitiontime = values["transitiontime"];
+            }
+
+            if (values.containsKey("alert") && values["alert"] == "select") {
+                if (lights[light].lightState) {
+                    lights[light].currentColors[0] = 0; lights[light].currentColors[1] = 0; lights[light].currentColors[2] = 0;
+                } else {
+                    lights[light].currentColors[1] = 126; lights[light].currentColors[2] = 126;
+                }
+            }
+            processLightdata(light, transitiontime);
+        }
+        String output;
+        serializeJson(root, output);
+        websrv.send(200, "text/plain", output);
+        if (stateSave) {
+            saveState();
+        }
     }
-    websrv.send(200, "text/plain", output);
-    Log("StatePut: " + output);
 }
 
 void websrvReset() {
@@ -277,7 +540,7 @@ void websrvRoot() {
     Log("StateRoot: " + websrv.uri());
 
     if (websrv.arg("section").toInt() == 1) {
-        HUE_Name = websrv.arg("name");
+        websrv.arg("name").toCharArray(lightName, LIGHT_NAME_MAX_LENGTH);
         startup = websrv.arg("startup").toInt();
         scene = websrv.arg("scene").toInt();
         HUE_LightsCount = websrv.arg("lightscount").toInt();
@@ -313,7 +576,7 @@ void websrvConfig() {
     String output;
     HueApi::state tmpState;
 
-    root["name"] = HUE_Name;
+    root["name"] = lightName;
     root["scene"] = scene;
     root["startup"] = startup;
     root["hw"] = hwSwitch;
@@ -321,6 +584,9 @@ void websrvConfig() {
     root["off"] = offPin;
     root["hwswitch"] = (int)hwSwitch;
     root["lightscount"] = HUE_LightsCount;
+    for (uint8_t i = 0; i < HUE_LightsCount; i++) {
+        root["dividedLight_" + String(i)] = (int)dividedLightsArray[i];
+    }
     root["pixelcount"] = HUE_PixelPerLight;
     root["transitionleds"] = HUE_TransitionLeds;
     root["rpct"] = RGB_R;
@@ -467,9 +733,6 @@ void hue_main_init() {
     loadConfig();
     restoreState();
 
-    objHue.setupLights(HUE_Name, HUE_LightsCount, HUE_PixelPerLight, HUE_TransitionLeds);
-    objHue.apply_scene(scene);
-
     websrv.on("/state", HTTP_PUT, websrvStatePut);
     websrv.on("/state", HTTP_GET, websrvStateGet);
     websrv.on("/detect", websrvDetect);
@@ -491,7 +754,9 @@ void hue_main_init() {
 void hue_main_update() {
     ArduinoOTA.handle();
     websrv.handleClient();
-    objHue.lightEngine();
+
+    Serial.println(lights[1].lightState);
+
     FastLED.show();
 
     EVERY_N_MILLISECONDS(200) {
