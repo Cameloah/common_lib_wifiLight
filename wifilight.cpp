@@ -8,8 +8,8 @@
 
 #include <FastLED.h>
 #include <Arduino.h>
-#include "Hue.h"
-#include "hue_main.h"
+#include "include/Hue.h"
+#include "include/wifilight.h"
 
 // physical length of led-strip
 #define NUM_LEDS 30
