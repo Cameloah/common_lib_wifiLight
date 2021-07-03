@@ -219,7 +219,6 @@ public:
         CRGB* currentColor;             // pointer to one led representing the color of that virtual hue-light
         int stepLevel;                  // amount of transition in every loop
 
-        int firstLed, lastLed;          // range of leds representing this emulated hue-light
         int lightNr;                    // hue light-nr
         bool lightState;                // true = On, false = Off
         uint8_t colorMode;              // 1 = xy, 2 = ct, 3 = hue/sat
@@ -234,38 +233,30 @@ public:
     state* lights = new state[0];    //holds the emulated hue-lights
     String LightName_;
     uint8_t LightsCount_;         //number of emulated hue-lights
-    uint16_t PixelPerLight_;         //number of leds forming one emulated hue-light
-    uint8_t TransitionLeds_;      //number of 'space'-leds inbetween the emulated hue-lights; pixelCount must be divisible by this value
-    CRGB* leds_;
     byte* mac_;
     int FirstHueLightNr_;         //first free number for the first hue-light (look in diyHue config.json)
     bool NeedSave;            // indecates, if we have unsaved changes
 
     // constructor
     HueApi();
-    HueApi(CRGB* Leds, byte* mac, int FirstHueLightNr = 1) :
-            leds_(Leds), mac_(mac), FirstHueLightNr_(FirstHueLightNr) {
+    HueApi(byte* mac, int FirstHueLightNr = 1) :
+            mac_(mac), FirstHueLightNr_(FirstHueLightNr) {
         maxDist = ColorDist(CRGB::White, CRGB::Black);
     }
 
-    void setupLights(String LightName, uint8_t LightsCount, uint16_t PixelPerLight, uint8_t TransitionLeds) {
+    void setupLights(String LightName, uint8_t LightsCount) {
 
         int x;
 
         LightName_ = LightName;
         LightsCount_ = LightsCount;
-        PixelPerLight_ = PixelPerLight;
-        TransitionLeds_ = TransitionLeds;
 
         lights = new state[LightsCount_];
 
         for (uint8_t i = 0; i < LightsCount_; i++) {
-            lights[i].firstLed = TransitionLeds_ / 2 + i * PixelPerLight_ + TransitionLeds_ * i;     //﻿=transitionLeds / 2 + i * lightLeds + transitionLeds * i
-            lights[i].lastLed = lights[i].firstLed + PixelPerLight_;
             lights[i].lightNr = FirstHueLightNr_ + i;
 
-            x = lights[i].firstLed + (int)((lights[i].lastLed - lights[i].firstLed) / 2);
-            lights[i].currentColor = &leds_[x];
+            lights[i].currentColor = (CRGB *) CRGB::Azure;
 
             lights[i].lightState = true;
             lights[i].color = CRGB::Yellow;
@@ -286,7 +277,6 @@ public:
             lights[light].color = CRGB(CRGB::Black);
         }
 
-        transitiontime *= 17 - (PixelPerLight_ / 40);         //every extra led add a small delay that need to be counted
         if (lights[light].lightState) {
             tmp = ColorDist(*lights[light].currentColor, lights[light].color);
             tmp = tmp / maxDist * 255;
@@ -296,20 +286,6 @@ public:
             tmp = tmp / maxDist * 255;
             lights[light].stepLevel = (int) (tmp / transitiontime);
         }
-    }
-
-    void lightEngine() {
-
-        for (int light = 0; light < LightsCount_; light++) {
-
-            if ( lights[light].lightState && lights[light].color != *lights[light].currentColor || *lights[light].currentColor > CRGB(CRGB::Black)) {
-                inTransition = true;
-                this->fadeTowardColor(leds_, lights[light].color, lights[light].firstLed, lights[light].lastLed, lights[light].stepLevel);
-            } else {
-                inTransition = false;
-            }
-        }
-        if (inTransition) delay(6);
     }
 
     void apply_scene(uint8_t new_scene) {

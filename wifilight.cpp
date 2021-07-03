@@ -8,19 +8,8 @@
 
 #include <FastLED.h>
 #include <Arduino.h>
-#include "include/Hue.h"
-#include "include/wifilight.h"
-
-// physical length of led-strip
-#define NUM_LEDS 30
-
-// FastLED settings, data and clock pin for spi communication
-// Note that the protocol for SM16716 is the same for the SM16726
-#define DATA_PIN 5
-#define CLOCK_PIN 19
-#define COLOR_ORDER GRB
-#define LED_TYPE WS2812B
-#define CORRECTION TypicalLEDStrip
+#include "Hue.h"
+#include "wifilight.h"
 
 // May get messed up with SPI CLOCK_PIN with this particular bulb
 #define use_hardware_switch false // To control on/off state and brightness using GPIO/Pushbutton, set this value to true.
@@ -32,9 +21,6 @@
 // True - add cold white LEDs according to luminance/ whiteness in xy color selector
 // False - Don't
 #define W_ON_XY true
-
-// Set up array for use by FastLED
-CRGBArray<NUM_LEDS> leds;
 
 // define details of virtual hue-lights -- adapt to your needs!
 String HUE_Name = "Hue SK9822 FastLED strip";   //max 32 characters!!!
@@ -60,14 +46,15 @@ Preferences Conf;
 //MQTTClient MQTT(1024);
 WiFiClient net;
 
-HueApi objHue = HueApi(leds, mac, HUE_FirstHueLightNr);
+HueApi objHue = HueApi(mac, HUE_FirstHueLightNr);
+
+extern wifilight_state* hue_lights = NULL;
 
 void Log(String msg) {
 
     Serial.println(msg);
 
 }
-
 
 String WebLog(String message) {
 
@@ -85,6 +72,7 @@ String WebLog(String message) {
 void infoLight(CRGB color) {
 
     // Flash the strip in the selected color. White = booted, green = WLAN connected, red = WLAN could not connect
+    /*
     for (int i = 0; i < NUM_LEDS; i++) {
         leds[i] = color;
         FastLED.show();
@@ -92,6 +80,7 @@ void infoLight(CRGB color) {
     }
     leds = CRGB(CRGB::Black);
     FastLED.show();
+     */
 }
 
 void saveState() {
@@ -238,7 +227,8 @@ bool loadConfig() {
     submask = {json["mask"][0], json["mask"][1], json["mask"][2], json["mask"][3]};
     gateway = {json["gw"][0], json["gw"][1], json["gw"][2], json["gw"][3]};
 
-    objHue.setupLights(HUE_Name, HUE_LightsCount, HUE_PixelPerLight, HUE_TransitionLeds);
+    Serial.println("setup");
+    objHue.setupLights(HUE_Name, HUE_LightsCount);
 
     return true;
 }
@@ -419,6 +409,7 @@ void websrvNotFound() {
 
 } */
 
+
 void hue_main_init() {
 
     Serial.begin(115200);
@@ -426,8 +417,6 @@ void hue_main_init() {
     delay(1000);
 
     Conf.begin("HueLED", false);
-
-    FastLED.addLeds<LED_TYPE, DATA_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
 
     ESP_WiFiManager wifiManager;
     if (!useDhcp) {
@@ -467,8 +456,13 @@ void hue_main_init() {
     loadConfig();
     restoreState();
 
-    objHue.setupLights(HUE_Name, HUE_LightsCount, HUE_PixelPerLight, HUE_TransitionLeds);
+    Serial.println("setup");
+    objHue.setupLights(HUE_Name, HUE_LightsCount);
+    Serial.println("scene");
     objHue.apply_scene(scene);
+    Serial.println("not the hue class");
+
+    hue_lights = (wifilight_state*) objHue.lights;
 
     websrv.on("/state", HTTP_PUT, websrvStatePut);
     websrv.on("/state", HTTP_GET, websrvStateGet);
@@ -488,14 +482,9 @@ void hue_main_init() {
     Log("Up and running.");
 }
 
+
 void hue_main_update() {
     ArduinoOTA.handle();
     websrv.handleClient();
-    objHue.lightEngine();
-    FastLED.show();
-
-    EVERY_N_MILLISECONDS(200) {
-        ArduinoOTA.handle();
-        //MQTT.loop();
-    }
+    Serial.println("running");
 }
