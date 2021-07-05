@@ -1,8 +1,6 @@
-#include <WiFiUdp.h>
 #include <ArduinoOTA.h>
 #include <WebServer.h>
 #include <ESP_WiFiManager.h>
-// #include <MQTT.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
 
@@ -22,31 +20,15 @@
 #define LED_TYPE WS2812B
 #define CORRECTION TypicalLEDStrip
 
-#define LIGHT_VERSION 3.1
-#define LIGHT_NAME_MAX_LENGTH 32 // Longer name will get stripped
-#define ENTERTAINMENT_TIMEOUT 1500 // millis
-
-// May get messed up with SPI CLOCK_PIN with this particular bulb
-#define use_hardware_switch false // To control on/off state and brightness using GPIO/Pushbutton, set this value to true.
-//For GPIO based on/off and brightness control, it is mandatory to connect the following GPIO pins to ground using 10k resistor
-#define onPin 4 // on and brightness up
-#define offPin 5 // off and brightness down
-
-// !!!!!!!! Experimental !!!!!!!!!!
-// True - add cold white LEDs according to luminance/ whiteness in xy color selector
-// False - Don't
-#define W_ON_XY true
-
 // Set up array for use by FastLED
 CRGBArray<NUM_LEDS> leds;
+
 
 // define details of virtual hue-lights -- adapt to your needs!
 char lightName[LIGHT_NAME_MAX_LENGTH] = "Hue SK9822 FastLED strip";   //max 32 characters!!!
 int HUE_LightsCount = 2;                     //number of emulated hue-lights
-uint16_t dividedLightsArray[30];
 int HUE_PixelPerLight = 15;                  //number of leds forming one emulated hue-light
 int HUE_TransitionLeds = 1;                 //number of 'space'-leds inbetween the emulated hue-lights; pixelCount must be divisible by this value
-int HUE_FirstHueLightNr = 18;                //first free number for the first hue-light (look in diyHue config.json)
 int HUE_ColorCorrectionRGB[3] = {100, 100, 100};  // light multiplier in percentage /R, G, B/
 
 bool useDhcp = false;
@@ -55,32 +37,23 @@ IPAddress gateway ( 192,  168,   0,   1);     // Router IP
 IPAddress submask(255, 255, 255,   0);
 byte mac[6]; // to hold  the wifi mac address
 
+// hue variables
 uint8_t scene;
 uint8_t startup;
 bool hwSwitch = false;
+uint8_t pin_hws_on = PIN_HWSWITCH_ON;
+uint8_t pin_hws_off = PIN_HWSWITCH_OFF;
+uint16_t dividedLightsArray[30];
+extern state lights[10];
 
-struct state {
-    uint8_t colors[3], bri = 100, sat = 254, colorMode = 2;
-    bool lightState;
-    int ct = 200, hue;
-    float stepLevel[3], currentColors[3], x, y;
-};
-
-state lights[10];
-bool inTransition, entertainmentRun;
-uint8_t rgb_multiplier[] = {100, 100, 100}; // light multiplier in percentage /R, G, B/
-
+// wifi
 WebServer websrv(80);
 Preferences Conf;
-//MQTTClient MQTT(1024);
 WiFiClient net;
 
 void Log(String msg) {
-
     Serial.println(msg);
-
 }
-
 
 String WebLog(String message) {
 
@@ -177,9 +150,9 @@ void convertXy(uint8_t light) // convert CIE xy values from HUE API to RGB
     b = b <= 0.0031308f ? 12.92f * b : (1.0f + 0.055f) * pow(b, (1.0f / 2.4f)) - 0.055f;
 
     // Apply multiplier for white correction
-    r = r * rgb_multiplier[0] / 100;
-    g = g * rgb_multiplier[1] / 100;
-    b = b * rgb_multiplier[2] / 100;
+    r = r * HUE_ColorCorrectionRGB[0] / 100;
+    g = g * HUE_ColorCorrectionRGB[1] / 100;
+    b = b * HUE_ColorCorrectionRGB[2] / 100;
 
     if (r > b && r > g) {
         // red is biggest
@@ -232,9 +205,9 @@ void convertCt(uint8_t light) // convert ct (color temperature) value from HUE A
     b = b > 255 ? 255 : b;
 
     // Apply multiplier for white correction
-    r = r * rgb_multiplier[0] / 100;
-    g = g * rgb_multiplier[1] / 100;
-    b = b * rgb_multiplier[2] / 100;
+    r = r * HUE_ColorCorrectionRGB[0] / 100;
+    g = g * HUE_ColorCorrectionRGB[1] / 100;
+    b = b * HUE_ColorCorrectionRGB[2] / 100;
 
     lights[light].colors[0] = r * (lights[light].bri / 255.0f); lights[light].colors[1] = g * (lights[light].bri / 255.0f); lights[light].colors[2] = b * (lights[light].bri / 255.0f);
 }
@@ -308,7 +281,7 @@ void restoreState() {
 
     error = deserializeJson(json, Input);
     if (error) {
-        //Serial.println("Failed to parse config file");
+        Log("Failed to parse config file");
         return;
     }
     for (JsonPair state : json.as<JsonObject>()) {
@@ -335,6 +308,8 @@ void restoreState() {
             }
         }
     }
+
+    Log("Restored previous state.");
 }
 
 void saveConfig() {
@@ -346,8 +321,8 @@ void saveConfig() {
     json["name"] = lightName;
     json["startup"] = startup;
     json["scene"] = scene;
-    json["on"] = onPin;
-    json["off"] = offPin;
+    json["on"] = pin_hws_on;
+    json["off"] = pin_hws_off;
     json["hw"] = hwSwitch;
     json["dhcp"] = useDhcp;
     json["lightsCount"] = HUE_LightsCount;
@@ -376,7 +351,6 @@ void saveConfig() {
     Conf.putString("ConfJson", Output);
 
     Log("saveConfig: " + Output);
-
 }
 
 bool loadConfig() {
@@ -398,6 +372,9 @@ bool loadConfig() {
     strcpy(lightName, json["name"]);
     startup = json["startup"].as<uint8_t>();
     scene  = json["scene"].as<uint8_t>();
+    pin_hws_on = (uint8_t) json["on"];
+    pin_hws_off = (uint8_t) json["off"];
+    hwSwitch = json["hw"];
     HUE_LightsCount = json["lightsCount"].as<uint16_t>();
     HUE_PixelPerLight = json["pixelCount"].as<uint16_t>();
     HUE_TransitionLeds = json["transLeds"].as<uint8_t>();
@@ -550,6 +527,8 @@ void websrvRoot() {
         HUE_ColorCorrectionRGB[1] = websrv.arg("gpct").toInt();
         HUE_ColorCorrectionRGB[2] = websrv.arg("bpct").toInt();
         hwSwitch = websrv.hasArg("hwswitch") ? websrv.arg("hwswitch").toInt() : 0;
+        pin_hws_on = websrv.arg("on").toInt();
+        pin_hws_off = websrv.arg("off").toInt();
 
         saveConfig();
     } else if (websrv.arg("section").toInt() == 2) {
@@ -580,8 +559,8 @@ void websrvConfig() {
     root["scene"] = scene;
     root["startup"] = startup;
     root["hw"] = hwSwitch;
-    root["on"] = onPin;
-    root["off"] = offPin;
+    root["on"] = pin_hws_on;
+    root["off"] = pin_hws_off;
     root["hwswitch"] = (int)hwSwitch;
     root["lightscount"] = HUE_LightsCount;
     for (uint8_t i = 0; i < HUE_LightsCount; i++) {
@@ -589,9 +568,9 @@ void websrvConfig() {
     }
     root["pixelcount"] = HUE_PixelPerLight;
     root["transitionleds"] = HUE_TransitionLeds;
-    root["rpct"] = RGB_R;
-    root["gpct"] = RGB_G;
-    root["bpct"] = RGB_B;
+    root["rpct"] = HUE_ColorCorrectionRGB[0];
+    root["gpct"] = HUE_ColorCorrectionRGB[1];
+    root["bpct"] = HUE_ColorCorrectionRGB[2];
     root["disdhcp"] = (int)!useDhcp;
     root["addr"] = (String)address[0] + "." + (String)address[1] + "." + (String)address[2] + "." + (String)address[3];
     root["gw"] = (String)gateway[0] + "." + (String)gateway[1] + "." + (String)gateway[2] + "." + (String)gateway[3];
@@ -615,85 +594,23 @@ void websrvNotFound() {
     websrv.send(404, "text/plain", WebLog("File Not Found\n\n"));
 }
 
-
-/*void convert_hue() {
-  double      hh, p, q, t, ff, s, v;
-  long        i;
-
-
-  s = sat / 255.0;
-  v = bri / 255.0;
-
-  // Test for intensity for white LEDs
-  float I = (float)(sat + bri) / 2;
-
-  if (s <= 0.0) {      // < is bogus, just shuts up warnings
-    rgbw[0] = v;
-    rgbw[1] = v;
-    rgbw[2] = v;
-    return;
-  }
-  hh = hue;
-  if (hh >= 65535.0) hh = 0.0;
-  hh /= 11850, 0;
-  i = (long)hh;
-  ff = hh - i;
-  p = v * (1.0 - s);
-  q = v * (1.0 - (s * ff));
-  t = v * (1.0 - (s * (1.0 - ff)));
-
-  switch (i) {
-    case 0:
-      rgbw[0] = v * 255.0;
-      rgbw[1] = t * 255.0;
-      rgbw[2] = p * 255.0;
-      rgbw[3] = I;
-      break;
-    case 1:
-      rgbw[0] = q * 255.0;
-      rgbw[1] = v * 255.0;
-      rgbw[2] = p * 255.0;
-      rgbw[3] = I;
-      break;
-    case 2:
-      rgbw[0] = p * 255.0;
-      rgbw[1] = v * 255.0;
-      rgbw[2] = t * 255.0;
-      rgbw[3] = I;
-      break;
-
-    case 3:
-      rgbw[0] = p * 255.0;
-      rgbw[1] = q * 255.0;
-      rgbw[2] = v * 255.0;
-      rgbw[3] = I;
-      break;
-    case 4:
-      rgbw[0] = t * 255.0;
-      rgbw[1] = p * 255.0;
-      rgbw[2] = v * 255.0;
-      rgbw[3] = I;
-      break;
-    case 5:
-    default:
-      rgbw[0] = v * 255.0;
-      rgbw[1] = p * 255.0;
-      rgbw[2] = q * 255.0;
-      rgbw[3] = I;
-      break;
-  }
-
-} */
-
 void hue_main_init() {
 
     Serial.begin(115200);
-    Serial.println();
     delay(1000);
 
     Conf.begin("HueLED", false);
 
     FastLED.addLeds<LED_TYPE, DATA_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
+
+
+    if (loadConfig() == false) {
+        Log("No config data. Creating config data.");
+        saveConfig();
+        loadConfig();
+    }
+
+    restoreState();
 
     ESP_WiFiManager wifiManager;
     if (!useDhcp) {
@@ -722,16 +639,10 @@ void hue_main_init() {
     // ArduinoOTA.setPassword((const char *)"123");   // No authentication by default
     ArduinoOTA.begin();
 
-    if (use_hardware_switch == true) {
-        pinMode(onPin, INPUT);
-        pinMode(offPin, INPUT);
+    if (hwSwitch == true) {
+        pinMode(pin_hws_on, INPUT);
+        pinMode(pin_hws_off, INPUT);
     }
-
-    //ConnectMQTT();
-
-    if (loadConfig() == false) {saveConfig(); };
-    loadConfig();
-    restoreState();
 
     websrv.on("/state", HTTP_PUT, websrvStatePut);
     websrv.on("/state", HTTP_GET, websrvStateGet);
@@ -755,12 +666,27 @@ void hue_main_update() {
     ArduinoOTA.handle();
     websrv.handleClient();
 
-    Serial.println(lights[1].lightState);
+    String debug_output = "State: " + String(lights[1].lightState);
+    debug_output += ", RGB: " + String(lights[1].colors[0]);
+    debug_output += " " + String(lights[1].colors[1]);
+    debug_output += " " + String(lights[1].colors[2]);
+    debug_output += ", current RGB: " + String(lights[1].currentColors[0]);
+    debug_output += " " + String(lights[1].currentColors[1]);
+    debug_output += " " + String(lights[1].currentColors[2]);
+    debug_output += ", xy: " + String(lights[1].x);
+    debug_output += " " + String(lights[1].y);
+    debug_output += ", Bri: " + String(lights[1].bri);
+    debug_output += ", ct: " + String(lights[1].ct);
+    debug_output += ", hue: " + String(lights[1].hue);
+    debug_output += ", steps: " + String(lights[1].stepLevel[0]);
+    debug_output += " " + String(lights[1].stepLevel[1]);
+    debug_output += " " + String(lights[1].stepLevel[2]);
+
+    Log(debug_output);
 
     FastLED.show();
 
     EVERY_N_MILLISECONDS(200) {
         ArduinoOTA.handle();
-        //MQTT.loop();
     }
 }
