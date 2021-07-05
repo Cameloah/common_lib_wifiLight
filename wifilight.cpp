@@ -1,41 +1,18 @@
-#include <ArduinoOTA.h>
 #include <WebServer.h>
 #include <ESP_WiFiManager.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
-
-#include <FastLED.h>
 #include <Arduino.h>
-#include "Hue.h"
 #include "wifilight.h"
 
-// physical length of led-strip
-#define NUM_LEDS 30
-
-// FastLED settings, data and clock pin for spi communication
-// Note that the protocol for SM16716 is the same for the SM16726
-#define DATA_PIN 5
-#define CLOCK_PIN 19
-#define COLOR_ORDER GRB
-#define LED_TYPE WS2812B
-#define CORRECTION TypicalLEDStrip
-
-// Set up array for use by FastLED
-CRGBArray<NUM_LEDS> leds;
 
 
 // define details of virtual hue-lights -- adapt to your needs!
 char lightName[LIGHT_NAME_MAX_LENGTH] = "Hue SK9822 FastLED strip";   //max 32 characters!!!
-int HUE_LightsCount = 2;                     //number of emulated hue-lights
-int HUE_PixelPerLight = 15;                  //number of leds forming one emulated hue-light
-int HUE_TransitionLeds = 1;                 //number of 'space'-leds inbetween the emulated hue-lights; pixelCount must be divisible by this value
-int HUE_ColorCorrectionRGB[3] = {100, 100, 100};  // light multiplier in percentage /R, G, B/
-
-bool useDhcp = false;
-IPAddress address ( 192,  168,   0,  82);     // choose an unique IP Adress
-IPAddress gateway ( 192,  168,   0,   1);     // Router IP
-IPAddress submask(255, 255, 255,   0);
-byte mac[6]; // to hold  the wifi mac address
+uint8_t HUE_LightsCount = 2;                     //number of emulated hue-lights
+uint8_t HUE_PixelPerLight = 15;                  //number of leds forming one emulated hue-light
+uint8_t HUE_TransitionLeds = 1;                 //number of 'space'-leds inbetween the emulated hue-lights; pixelCount must be divisible by this value
+uint8_t HUE_ColorCorrectionRGB[3] = {100, 100, 100};  // light multiplier in percentage /R, G, B/
 
 // hue variables
 uint8_t scene;
@@ -44,12 +21,19 @@ bool hwSwitch = false;
 uint8_t pin_hws_on = PIN_HWSWITCH_ON;
 uint8_t pin_hws_off = PIN_HWSWITCH_OFF;
 uint16_t dividedLightsArray[30];
-extern state lights[10];
 
-// wifi
+wifilight_state_t lights[10];
+
+// wifi settings
+bool useDhcp = false;
+IPAddress address ( 192,  168,   0,  82);     // choose an unique IP Adress
+IPAddress gateway ( 192,  168,   0,   1);     // Router IP
+IPAddress submask(255, 255, 255,   0);
+byte mac[6]; // to hold  the wifi mac address
 WebServer websrv(80);
 Preferences Conf;
 WiFiClient net;
+
 
 void Log(String msg) {
     Serial.println(msg);
@@ -212,11 +196,11 @@ void convertCt(uint8_t light) // convert ct (color temperature) value from HUE A
     lights[light].colors[0] = r * (lights[light].bri / 255.0f); lights[light].colors[1] = g * (lights[light].bri / 255.0f); lights[light].colors[2] = b * (lights[light].bri / 255.0f);
 }
 
-void infoLight(CRGB color) {
+void infoLight(CRGB color, CRGBSet& leds) {
 
     // Flash the strip in the selected color. White = booted, green = WLAN connected, red = WLAN could not connect
-    for (int i = 0; i < NUM_LEDS; i++) {
-        leds[i] = color;
+    for (int i = 0; i < 30; i++) {
+        leds = color;
         FastLED.show();
         leds.fadeToBlackBy(10);
     }
@@ -225,7 +209,6 @@ void infoLight(CRGB color) {
 }
 
 void processLightdata(uint8_t light, float transitiontime) { // calculate the step level of every RGB channel for a smooth transition in requested transition time
-    transitiontime *= 17 - (NUM_LEDS / 40); //every extra led add a small delay that need to be counted for transition time match
     if (lights[light].colorMode == 1 && lights[light].lightState == true) {
         convertXy(light);
     } else if (lights[light].colorMode == 2 && lights[light].lightState == true) {
@@ -241,7 +224,6 @@ void processLightdata(uint8_t light, float transitiontime) { // calculate the st
         }
     }
 }
-
 
 void saveState() {
 
@@ -442,7 +424,7 @@ void websrvStatePut() {
             const char* key = state.key().c_str();
             int light = atoi(key) - 1;
             JsonObject values = state.value();
-            int transitiontime = 4;
+            int transitiontime = 50;
 
             if (values.containsKey("xy")) {
                 lights[light].x = values["xy"][0];
@@ -553,7 +535,6 @@ void websrvConfig() {
 
     DynamicJsonDocument root(1024);
     String output;
-    HueApi::state tmpState;
 
     root["name"] = lightName;
     root["scene"] = scene;
@@ -594,50 +575,38 @@ void websrvNotFound() {
     websrv.send(404, "text/plain", WebLog("File Not Found\n\n"));
 }
 
-void hue_main_init() {
+void wifilight_init(CRGBSet& user_leds) {
 
-    Serial.begin(115200);
-    delay(1000);
-
+    // initiate file system and load config if available
     Conf.begin("HueLED", false);
-
-    FastLED.addLeds<LED_TYPE, DATA_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
-
-
     if (loadConfig() == false) {
         Log("No config data. Creating config data.");
         saveConfig();
         loadConfig();
     }
-
     restoreState();
 
+    // initialize wifi
     ESP_WiFiManager wifiManager;
     if (!useDhcp) {
         wifiManager.setSTAStaticIPConfig(address, gateway, submask);
     }
-    wifiManager.autoConnect("New Hue Light");
-
+    wifiManager.autoConnect("New ESP32 Light");
     if (useDhcp) {
         address = WiFi.localIP();
         gateway = WiFi.gatewayIP();
         submask = WiFi.subnetMask();
     }
 
-    infoLight(CRGB::White);
+    infoLight(CRGB::White, user_leds);
     while (WiFi.status() != WL_CONNECTED) {
-        infoLight(CRGB::Red);
+        infoLight(CRGB::Red, user_leds);
         delay(500);
     }
     // Show that we are connected
-    infoLight(CRGB::Green);
+    infoLight(CRGB::Green, user_leds);
 
     WiFi.macAddress(mac);         //gets the mac-address
-
-    // ArduinoOTA.setPort(8266);                      // Port defaults to 8266
-    // ArduinoOTA.setHostname("myesp8266");           // Hostname defaults to esp8266-[ChipID]
-    // ArduinoOTA.setPassword((const char *)"123");   // No authentication by default
-    ArduinoOTA.begin();
 
     if (hwSwitch == true) {
         pinMode(pin_hws_on, INPUT);
@@ -662,8 +631,7 @@ void hue_main_init() {
     Log("Up and running.");
 }
 
-void hue_main_update() {
-    ArduinoOTA.handle();
+void wifilight_update() {
     websrv.handleClient();
 
     String debug_output = "State: " + String(lights[1].lightState);
@@ -683,10 +651,4 @@ void hue_main_update() {
     debug_output += " " + String(lights[1].stepLevel[2]);
 
     Log(debug_output);
-
-    FastLED.show();
-
-    EVERY_N_MILLISECONDS(200) {
-        ArduinoOTA.handle();
-    }
 }

@@ -1,4 +1,4 @@
-
+#include "FastLED.h"
 // hardware defines
 #define USE_HARDWARE_SWITCH false // To control on/off state and brightness using GPIO/Pushbutton, set this value to true.
 //For GPIO based on/off and brightness control, pull the following pins to ground using 10k resistor
@@ -15,26 +15,16 @@ typedef struct {
     uint8_t sat;
     uint8_t colorMode;
     bool lightState;
-    int ct;
+    uint16_t ct;
     int hue;
     float stepLevel[3];
     float currentColors[3], x, y;
 } wifilight_state_t;
 
-struct state {
-    uint8_t colors[3];
-    uint8_t bri = 100;
-    uint8_t sat = 254;
-    uint8_t colorMode = 2;
-    bool lightState;
-    int ct = 200, hue;
-    float stepLevel[3];
-    float currentColors[3], x, y;
-};
 
-extern state lights[10];
+extern wifilight_state_t lights[];
 
 
-void hue_main_init();
+void wifilight_init(CRGBSet& user_leds);
 
-void hue_main_update();
+void wifilight_update();
