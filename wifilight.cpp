@@ -36,7 +36,7 @@ WiFiClient net;
 
 
 void Log(String msg) {
-    Serial.println(msg);
+    //Serial.println(msg);
 }
 
 String WebLog(String message) {
