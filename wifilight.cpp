@@ -26,7 +26,7 @@ wifilight_state_t lights[10];
 
 // wifi settings
 bool useDhcp = false;
-IPAddress address ( 192,  168,   0,  82);     // choose an unique IP Adress
+IPAddress address ( 192,  168,   0,  82);     // choose an unique IP Address
 IPAddress gateway ( 192,  168,   0,   1);     // Router IP
 IPAddress submask(255, 255, 255,   0);
 byte mac[6]; // to hold  the wifi mac address
@@ -608,7 +608,7 @@ void wifilight_init(CRGBSet& user_leds) {
 
     WiFi.macAddress(mac);         //gets the mac-address
 
-    if (hwSwitch == true) {
+    if (hwSwitch) {
         pinMode(pin_hws_on, INPUT);
         pinMode(pin_hws_off, INPUT);
     }
